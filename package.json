@@ -1,0 +1,19 @@
+{
+  "name": "my-note",
+  "version": "1.0.0",
+  "description": "A web application for developers to take daily notes.",
+  "main": "index.js",
+  "author": "Saiful Islam Shihab",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start:client": "yarn workspace my-note-client dev",
+    "start:server": "yarn workspace my-note-server dev"
+  },
+  "workspaces": [
+    "packages/**"
+  ],
+  "devDependencies": {
+    "prettier": "^2.8.8"
+  }
+}

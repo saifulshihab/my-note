@@ -1,0 +1,20 @@
+{
+  "name": "my-note-server",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Saiful Islam Shihab",
+  "license": "MIT",
+  "scripts": {
+    "dev": "nodemon"
+  },
+  "dependencies": {
+    "@apollo/server": "^4.7.1",
+    "express": "^4.18.2",
+    "graphql": "^16.6.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.13",
+    "nodemon": "^2.0.22",
+    "ts-node": "^10.9.1"
+  }
+}
