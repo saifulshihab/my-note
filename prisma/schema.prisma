@@ -1,0 +1,385 @@
+// DevNotes — production schema. See docs/SYSTEM_DESIGN.md §5.
+// Multi-tenant: every domain row is scoped by workspaceId.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/prisma"
+  // Re-enable when semantic search lands: previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider = "postgresql"
+  // Re-enable for semantic search (see Embedding model below):
+  // extensions = [pgvector(map: "vector")]
+}
+
+// ─── Identity & Access ──────────────────────────────────────────────
+
+enum Role {
+  owner
+  admin
+  editor
+  commenter
+  viewer
+}
+
+enum Plan {
+  free
+  pro
+  team
+  enterprise
+}
+
+model User {
+  id            String    @id @default(uuid())
+  email         String    @unique
+  emailVerified DateTime? // Auth.js canonical field
+  passwordHash  String? // credentials login
+  name          String?
+  image         String? // Auth.js canonical field (avatar)
+  mfaSecret     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  accounts        Account[]
+  sessions        Session[]
+  memberships     WorkspaceMember[]
+  ownedWorkspaces Workspace[]       @relation("WorkspaceOwner")
+  notes           Note[]
+  comments        Comment[]
+  apiTokens       ApiToken[]
+  notifications   Notification[]
+}
+
+// Auth.js canonical Account shape (OAuth/SSO provider links).
+model Account {
+  id                String  @id @default(uuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String?
+  access_token      String?
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String?
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// Auth.js canonical Session shape + device-tracking extras.
+model Session {
+  id           String   @id @default(uuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+  ip           String?
+  userAgent    String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─── Workspaces & Membership ────────────────────────────────────────
+
+model Workspace {
+  id        String   @id @default(uuid())
+  name      String
+  slug      String   @unique
+  plan      Plan     @default(free)
+  ownerId   String
+  settings  Json     @default("{}")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  owner        User              @relation("WorkspaceOwner", fields: [ownerId], references: [id])
+  members      WorkspaceMember[]
+  notebooks    Notebook[]
+  notes        Note[]
+  tags         Tag[]
+  snippets     Snippet[]
+  attachments  Attachment[]
+  subscription Subscription?
+  webhooks     Webhook[]
+  auditLogs    AuditLog[]
+
+  @@index([ownerId])
+}
+
+model WorkspaceMember {
+  id          String   @id @default(uuid())
+  workspaceId String
+  userId      String
+  role        Role     @default(viewer)
+  invitedById String?
+  joinedAt    DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([workspaceId, userId])
+  @@index([userId])
+}
+
+// ─── Notes & Knowledge Graph ────────────────────────────────────────
+
+model Notebook {
+  id          String   @id @default(uuid())
+  workspaceId String
+  name        String
+  parentId    String?
+  position    Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  workspace Workspace  @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  parent    Notebook?  @relation("NotebookTree", fields: [parentId], references: [id])
+  children  Notebook[] @relation("NotebookTree")
+  notes     Note[]
+
+  @@index([workspaceId, parentId])
+}
+
+model Note {
+  id             String    @id @default(uuid())
+  workspaceId    String
+  notebookId     String?
+  authorId       String
+  title          String    @default("Untitled")
+  contentMd      String    @default("")
+  contentText    String    @default("") // stripped plaintext for FTS
+  crdtState      Bytes? // Yjs snapshot
+  isPinned       Boolean   @default(false)
+  currentVersion Int       @default(1)
+  deletedAt      DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  workspace   Workspace     @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  notebook    Notebook?     @relation(fields: [notebookId], references: [id])
+  author      User          @relation(fields: [authorId], references: [id])
+  versions    NoteVersion[]
+  tags        NoteTag[]
+  comments    Comment[]
+  shareLinks  ShareLink[]
+  attachments Attachment[]
+  // embeddings  Embedding[] // re-enable with semantic search
+  linksFrom   NoteLink[]    @relation("LinkSource")
+  linksTo     NoteLink[]    @relation("LinkTarget")
+
+  @@index([workspaceId, notebookId, updatedAt(sort: Desc)])
+  @@index([workspaceId, deletedAt])
+}
+
+model NoteVersion {
+  id        String   @id @default(uuid())
+  noteId    String
+  version   Int
+  authorId  String
+  contentMd String
+  diff      Json?
+  createdAt DateTime @default(now())
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@unique([noteId, version])
+}
+
+model Tag {
+  id          String @id @default(uuid())
+  workspaceId String
+  name        String
+  color       String?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  notes     NoteTag[]
+
+  @@unique([workspaceId, name])
+}
+
+model NoteTag {
+  noteId String
+  tagId  String
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  tag  Tag  @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([noteId, tagId])
+  @@index([tagId])
+}
+
+model NoteLink {
+  sourceNoteId String
+  targetNoteId String
+
+  source Note @relation("LinkSource", fields: [sourceNoteId], references: [id], onDelete: Cascade)
+  target Note @relation("LinkTarget", fields: [targetNoteId], references: [id], onDelete: Cascade)
+
+  @@id([sourceNoteId, targetNoteId])
+  @@index([targetNoteId])
+}
+
+// ─── Snippets, Attachments, Comments, Sharing ───────────────────────
+
+model Snippet {
+  id          String   @id @default(uuid())
+  workspaceId String
+  authorId    String
+  title       String
+  language    String
+  code        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId])
+}
+
+model Attachment {
+  id          String   @id @default(uuid())
+  workspaceId String
+  noteId      String?
+  uploaderId  String
+  storageKey  String
+  mime        String
+  size        Int
+  checksum    String?
+  scanStatus  String   @default("pending")
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  note      Note?     @relation(fields: [noteId], references: [id], onDelete: SetNull)
+
+  @@index([workspaceId])
+}
+
+model Comment {
+  id         String    @id @default(uuid())
+  noteId     String
+  authorId   String
+  body       String
+  anchor     Json?
+  resolvedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  note   Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+  author User @relation(fields: [authorId], references: [id])
+
+  @@index([noteId])
+}
+
+model ShareLink {
+  id           String    @id @default(uuid())
+  noteId       String
+  token        String    @unique
+  scope        String    @default("read")
+  passwordHash String?
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+
+  note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+}
+
+// ─── Search (semantic) ──────────────────────────────────────────────
+// Deferred until the semantic-search track. Re-enable this model, the
+// `embeddings` relation on Note, the pgvector datasource extension, and the
+// postgresqlExtensions preview feature together.
+//
+// model Embedding {
+//   id          String                       @id @default(uuid())
+//   workspaceId String
+//   noteId      String
+//   chunkIdx    Int
+//   content     String
+//   vector      Unsupported("vector(1536)")?
+//
+//   note Note @relation(fields: [noteId], references: [id], onDelete: Cascade)
+//
+//   @@index([workspaceId])
+//   @@index([noteId])
+// }
+
+// ─── Platform: API, billing, audit, notifications ───────────────────
+
+model ApiToken {
+  id          String    @id @default(uuid())
+  userId      String
+  workspaceId String
+  name        String
+  hash        String    @unique
+  scopes      String[]
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Webhook {
+  id          String   @id @default(uuid())
+  workspaceId String
+  url         String
+  events      String[]
+  secret      String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model Subscription {
+  id               String   @id @default(uuid())
+  workspaceId      String   @unique
+  stripeCustomerId String?
+  stripeSubId      String?
+  plan             Plan     @default(free)
+  status           String   @default("active")
+  periodEnd        DateTime?
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  workspaceId String
+  actorId     String?
+  action      String
+  target      String?
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  workspace Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+
+  @@index([workspaceId, createdAt(sort: Desc)])
+}
+
+model Notification {
+  id        String    @id @default(uuid())
+  userId    String
+  type      String
+  payload   Json
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
